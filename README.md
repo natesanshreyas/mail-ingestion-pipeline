@@ -89,8 +89,9 @@ An OpenAI API key (`sk-...`) from https://platform.openai.com/api-keys. The pipe
    - **Application (client) ID** → this is your `GRAPH_CLIENT_ID`
    - **Directory (tenant) ID** → this is your `GRAPH_TENANT_ID`
 
-3. Go to **API permissions → Add a permission → Microsoft Graph → Application permissions**. Add both of:
+3. Go to **API permissions → Add a permission → Microsoft Graph → Application permissions**. Add all three:
    - `Mail.Read`
+   - `Mail.Send` *(required for `scripts/send_test_emails.py` — safe to skip if you won't use the test sender)*
    - `Subscription.ReadWrite.All`
 
 4. Click **Grant admin consent for [your tenant]** and confirm. Both permissions must show a green ✓ status.
@@ -219,7 +220,26 @@ ingestion-worker-7d9f8b6c4-xk2pj   1/1     Running   0          2m
 kubectl logs -n mail-ingestion -l app=ingestion-worker -f
 ```
 
-Send a test email to a monitored mailbox. Within 30–60 seconds you should see log lines like:
+**Send test emails programmatically** (streams realistic insurance broker emails into the pipeline):
+```bash
+pip install msal httpx
+
+python scripts/send_test_emails.py \
+  --to broker@yourdomain.com \
+  --from-mailbox sender@yourdomain.com \
+  --delay 15 \
+  --loop
+```
+
+Or send a fixed batch:
+```bash
+python scripts/send_test_emails.py \
+  --to broker@yourdomain.com \
+  --from-mailbox sender@yourdomain.com \
+  --count 5
+```
+
+Within 30–60 seconds of each send you should see log lines like:
 ```
 Delta query for broker@example.com → 1 messages
 Published: email=AAMkAGI... sender=jbroker@insureco.com intent="Requesting renewal quote..."
