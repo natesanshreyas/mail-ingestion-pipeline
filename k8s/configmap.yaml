@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mail-ingestion-config
+  namespace: mail-ingestion
+data:
+  OPENAI_MODEL: "gpt-4o-mini"
+  EVENTHUB_NAME: "email-intents"
+  # Overridden per-deployment where needed
+  PORT_WEBHOOK: "8080"
+  PORT_WORKER: "8081"

@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: subscription-reconciler
+  namespace: mail-ingestion
+  labels:
+    app: subscription-reconciler
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: subscription-reconciler
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: reconciler
+              image: ${ACR_LOGIN_SERVER}/reconciler:${IMAGE_TAG}
+              imagePullPolicy: Always
+              env:
+                - name: GRAPH_TENANT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: mail-ingestion-secrets
+                      key: GRAPH_TENANT_ID
+                - name: GRAPH_CLIENT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: mail-ingestion-secrets
+                      key: GRAPH_CLIENT_ID
+                - name: GRAPH_CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: mail-ingestion-secrets
+                      key: GRAPH_CLIENT_SECRET
+                - name: GRAPH_CLIENT_STATE
+                  valueFrom:
+                    secretKeyRef:
+                      name: mail-ingestion-secrets
+                      key: GRAPH_CLIENT_STATE
+                - name: ASB_CONNECTION_STRING
+                  valueFrom:
+                    secretKeyRef:
+                      name: mail-ingestion-secrets
+                      key: ASB_SEND_CONNECTION_STRING   # reconciler needs Send to build the notification URL
+                - name: ASB_QUEUE_NAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: mail-ingestion-secrets
+                      key: ASB_QUEUE_NAME
+                - name: COSMOS_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: mail-ingestion-secrets
+                      key: COSMOS_ENDPOINT
+                - name: COSMOS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: mail-ingestion-secrets
+                      key: COSMOS_KEY
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "256Mi"

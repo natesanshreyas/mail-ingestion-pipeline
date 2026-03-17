@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-worker
+  namespace: mail-ingestion
+  labels:
+    app: ingestion-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingestion-worker
+  template:
+    metadata:
+      labels:
+        app: ingestion-worker
+    spec:
+      containers:
+        - name: ingestion-worker
+          image: ${ACR_LOGIN_SERVER}/ingestion-worker:${IMAGE_TAG}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: mail-ingestion-config
+          env:
+            - name: GRAPH_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mail-ingestion-secrets
+                  key: GRAPH_TENANT_ID
+            - name: GRAPH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mail-ingestion-secrets
+                  key: GRAPH_CLIENT_ID
+            - name: GRAPH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mail-ingestion-secrets
+                  key: GRAPH_CLIENT_SECRET
+            - name: GRAPH_CLIENT_STATE
+              valueFrom:
+                secretKeyRef:
+                  name: mail-ingestion-secrets
+                  key: GRAPH_CLIENT_STATE
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mail-ingestion-secrets
+                  key: OPENAI_API_KEY
+            - name: ASB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: mail-ingestion-secrets
+                  key: ASB_CONNECTION_STRING    # worker uses the Listen-only rule
+            - name: ASB_QUEUE_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: mail-ingestion-secrets
+                  key: ASB_QUEUE_NAME
+            - name: EVENTHUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: mail-ingestion-secrets
+                  key: EVENTHUB_CONNECTION_STRING
+            - name: STORAGE_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: mail-ingestion-secrets
+                  key: STORAGE_CONNECTION_STRING
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10

@@ -1,0 +1,22 @@
+# Copy this file to terraform.tfvars and fill in the values.
+# terraform.tfvars is git-ignored; never commit real secrets.
+
+prefix   = "mailingest"
+location = "eastus"
+
+graph_client_state = "replace-with-a-random-secret-string"
+openai_api_key     = "sk-..."
+
+aks_node_count   = 2
+aks_node_vm_size = "Standard_B2s"
+
+eventhub_partition_count = 4
+eventhub_retention_days  = 7
+
+cosmos_throughput = 400
+
+tags = {
+  project     = "mail-ingestion-pipeline"
+  environment = "production"
+  owner       = "your-team"
+}

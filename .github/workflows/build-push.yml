@@ -1,0 +1,51 @@
+name: Build & Push Images
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name ${{ secrets.ACR_NAME }}
+
+      - name: Build & push reconciler
+        run: |
+          docker build \
+            -f src/reconciler/Dockerfile \
+            -t $ACR_LOGIN_SERVER/reconciler:$IMAGE_TAG \
+            -t $ACR_LOGIN_SERVER/reconciler:latest \
+            src
+          docker push $ACR_LOGIN_SERVER/reconciler:$IMAGE_TAG
+          docker push $ACR_LOGIN_SERVER/reconciler:latest
+
+      - name: Build & push ingestion-worker
+        run: |
+          docker build \
+            -f src/ingestion_worker/Dockerfile \
+            -t $ACR_LOGIN_SERVER/ingestion-worker:$IMAGE_TAG \
+            -t $ACR_LOGIN_SERVER/ingestion-worker:latest \
+            src
+          docker push $ACR_LOGIN_SERVER/ingestion-worker:$IMAGE_TAG
+          docker push $ACR_LOGIN_SERVER/ingestion-worker:latest
