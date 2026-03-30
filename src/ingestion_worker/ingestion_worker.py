@@ -30,6 +30,7 @@ from azure.eventhub import EventHubProducerClient, EventData
 
 sys.path.insert(0, "/app/shared")
 from graph_client import GraphClient
+from content_understanding_client import ContentUnderstandingClient
 
 from delta_token_store import DeltaTokenStore
 
@@ -62,6 +63,24 @@ STORAGE_CONNECTION_STRING = os.environ["STORAGE_CONNECTION_STRING"]
 # How long (seconds) to wait on an empty queue before polling again
 ASB_MAX_WAIT_SECONDS = int(os.environ.get("ASB_MAX_WAIT_SECONDS", "30"))
 
+# ── Content Understanding (optional) ────────────────────────────────────────
+# Set AZURE_CU_ENDPOINT and AZURE_CU_API_KEY to enable attachment extraction.
+# Set AZURE_CU_ANALYZER_ID to use a custom analyzer (defaults to prebuilt-read).
+# If AZURE_CU_ENDPOINT is not set, attachments are listed in the event but not
+# analyzed — the pipeline works exactly as before.
+AZURE_CU_ENDPOINT    = os.environ.get("AZURE_CU_ENDPOINT", "")
+AZURE_CU_API_KEY     = os.environ.get("AZURE_CU_API_KEY", "")
+AZURE_CU_ANALYZER_ID = os.environ.get("AZURE_CU_ANALYZER_ID", "prebuilt-read")
+
+# Max attachment size to send to CU (bytes). Larger files are skipped.
+CU_MAX_ATTACHMENT_BYTES = int(os.environ.get("CU_MAX_ATTACHMENT_BYTES", str(10 * 1024 * 1024)))
+
+# Content types CU can handle
+_CU_SUPPORTED_TYPES = {
+    "application/pdf",
+    "image/jpeg", "image/jpg", "image/png", "image/tiff", "image/bmp",
+}
+
 # ---------------------------------------------------------------------------
 # Clients
 # ---------------------------------------------------------------------------
@@ -72,6 +91,20 @@ eh_producer = EventHubProducerClient.from_connection_string(
     conn_str=EVENTHUB_CONNECTION_STRING, eventhub_name=EVENTHUB_NAME
 )
 delta_store = DeltaTokenStore(STORAGE_CONNECTION_STRING)
+
+cu_client: ContentUnderstandingClient | None = None
+if AZURE_CU_ENDPOINT and AZURE_CU_API_KEY:
+    cu_client = ContentUnderstandingClient(
+        endpoint=AZURE_CU_ENDPOINT,
+        api_key=AZURE_CU_API_KEY,
+        analyzer_id=AZURE_CU_ANALYZER_ID,
+    )
+    logger.info(
+        "Content Understanding enabled (analyzer=%s endpoint=%s)",
+        AZURE_CU_ANALYZER_ID, AZURE_CU_ENDPOINT,
+    )
+else:
+    logger.info("Content Understanding disabled (AZURE_CU_ENDPOINT not set)")
 
 # ---------------------------------------------------------------------------
 # ASB consumer loop (runs in a background thread)
@@ -138,6 +171,65 @@ def _process_mailbox(mailbox_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Attachment processing (optional — requires AZURE_CU_ENDPOINT)
+# ---------------------------------------------------------------------------
+
+
+def _process_attachments(mailbox_id: str, message_id: str) -> list[dict]:
+    """
+    Fetch attachment list from Graph. If CU is enabled, download and analyze
+    each supported attachment. Returns a list of attachment dicts to include
+    in the Event Hubs event.
+
+    Each item is one of:
+      - CU analyzed:  {"filename": ..., "content_type": ..., "size_bytes": ...,
+                       "analyzer_id": ..., "fields": {...}, "markdown": "..."}
+      - Skipped:      {"filename": ..., "content_type": ..., "size_bytes": ...,
+                       "skipped_reason": "unsupported_type"|"too_large"|"cu_disabled"}
+      - Error:        {"filename": ..., "content_type": ..., "size_bytes": ...,
+                       "error": "..."}
+    """
+    attachments_meta = graph.list_attachments(mailbox_id, message_id)
+    if not attachments_meta:
+        return []
+
+    results = []
+    for meta in attachments_meta:
+        filename     = meta.get("name", "unknown")
+        content_type = (meta.get("contentType") or "").lower()
+        size_bytes   = meta.get("size", 0)
+        att_id       = meta.get("id", "")
+
+        base = {"filename": filename, "content_type": content_type, "size_bytes": size_bytes}
+
+        if cu_client is None:
+            results.append({**base, "skipped_reason": "cu_disabled"})
+            continue
+
+        if content_type not in _CU_SUPPORTED_TYPES:
+            results.append({**base, "skipped_reason": "unsupported_type"})
+            continue
+
+        if size_bytes > CU_MAX_ATTACHMENT_BYTES:
+            results.append({**base, "skipped_reason": "too_large"})
+            continue
+
+        try:
+            raw_bytes = graph.download_attachment(mailbox_id, message_id, att_id)
+            cu_result = cu_client.analyze_bytes(raw_bytes, content_type=content_type, filename=filename)
+            results.append({**base, **cu_result})
+            logger.info(
+                "CU analyzed attachment: file=%s fields=%d",
+                filename, len(cu_result.get("fields", {})),
+            )
+        except Exception as exc:
+            logger.warning("CU failed for attachment %s: %s", filename, exc)
+            results.append({**base, "error": str(exc)})
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
@@ -167,10 +259,23 @@ def _classify(msg: dict, mailbox_id: str) -> dict:
     raw_body     = body_obj.get("content", "") or msg.get("bodyPreview", "")
     body_text    = _strip_html(raw_body) if body_obj.get("contentType") == "html" else raw_body
 
+    # Process attachments (no-op if CU not configured)
+    attachments = _process_attachments(mailbox_id, email_id)
+
+    # Build user message for LLM — include CU-extracted fields as context
+    cu_context = ""
+    for att in attachments:
+        if att.get("fields"):
+            field_summary = ", ".join(
+                f"{k}={v['value']}" for k, v in att["fields"].items() if v.get("value")
+            )
+            cu_context += f"\nAttachment '{att['filename']}' extracted fields: {field_summary}"
+
     user_msg = (
         f"Subject: {subject}\n"
         f"From: {sender_name} <{sender_email}>\n\n"
         f"Body:\n{body_text[:3000]}"
+        + (f"\n\n--- Attachment Data ---{cu_context}" if cu_context else "")
     )
 
     try:
@@ -188,7 +293,7 @@ def _classify(msg: dict, mailbox_id: str) -> dict:
         logger.warning("LLM extraction failed for %s: %s", email_id, exc)
         extracted = {"name": sender_name, "email": sender_email, "intent": "extraction_failed"}
 
-    return {
+    event: dict[str, Any] = {
         "event_id":    str(uuid.uuid4()),
         "extracted_at": datetime.now(timezone.utc).isoformat(),
         "email_id":    email_id,
@@ -202,6 +307,11 @@ def _classify(msg: dict, mailbox_id: str) -> dict:
         "intent": extracted.get("intent", ""),
         "model":  OPENAI_MODEL,
     }
+
+    if attachments:
+        event["attachments"] = attachments
+
+    return event
 
 
 # ---------------------------------------------------------------------------

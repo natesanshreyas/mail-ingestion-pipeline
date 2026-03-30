@@ -2,6 +2,8 @@
 
 Automatically ingests emails from monitored mailboxes in near real-time, classifies them using OpenAI (extracting sender name, email, and intent), and forwards structured JSON to Azure Event Hubs for downstream consumption.
 
+Optionally integrates with **Azure AI Content Understanding** to extract structured fields from PDF and image attachments (ACORD forms, loss runs, certificates of insurance, etc.) before classification — so the intent extracted by the LLM is informed by the actual document content, not just the email body.
+
 ## How it works
 
 ```
@@ -13,8 +15,11 @@ Azure Service Bus queue  (no public endpoint required)
         │
         ▼
 Ingestion Worker (AKS)
-  ├─ Fetches new email content via Graph delta query
+  ├─ Fetches new email + attachment list via Graph delta query
+  ├─ [Optional] Downloads each PDF/image attachment
+  │    └─ Submits to Azure Content Understanding → structured fields
   ├─ Calls OpenAI → extracts { name, email, intent }
+  │    (CU-extracted fields injected as context if available)
   └─ Publishes JSON → Azure Event Hubs
 ```
 
@@ -22,24 +27,84 @@ A **reconciler** runs hourly as a Kubernetes CronJob. It checks every monitored 
 
 ### Output event shape
 
-Every email produces one JSON message on Event Hubs:
+Every email produces one JSON message on Event Hubs.
 
+**Without Content Understanding** (or emails with no attachments):
 ```json
 {
-  "event_id":    "550e8400-e29b-41d4-a716-446655440000",
+  "event_id":     "550e8400-e29b-41d4-a716-446655440000",
   "extracted_at": "2026-03-13T14:23:01Z",
-  "email_id":    "AAMkAGI...",
-  "mailbox_id":  "broker@example.com",
-  "subject":     "Re: Policy Renewal Q2",
-  "received_at": "2026-03-13T14:20:55Z",
+  "email_id":     "AAMkAGI...",
+  "mailbox_id":   "broker@example.com",
+  "subject":      "Re: Policy Renewal Q2",
+  "received_at":  "2026-03-13T14:20:55Z",
   "sender": {
     "name":  "Jane Broker",
     "email": "jbroker@insureco.com"
   },
   "intent": "Requesting a renewal quote for the commercial property policy expiring May 1.",
-  "model": "gpt-4o-mini"
+  "model":  "gpt-4o-mini"
 }
 ```
+
+**With Content Understanding enabled** (email has PDF/image attachments):
+```json
+{
+  "event_id":     "550e8400-e29b-41d4-a716-446655440000",
+  "extracted_at": "2026-03-13T14:23:01Z",
+  "email_id":     "AAMkAGI...",
+  "mailbox_id":   "broker@example.com",
+  "subject":      "Re: Policy Renewal Q2",
+  "received_at":  "2026-03-13T14:20:55Z",
+  "sender": {
+    "name":  "Jane Broker",
+    "email": "jbroker@insureco.com"
+  },
+  "intent": "Requesting renewal for commercial property policy CP-2041 expiring May 1, total insured value $4.2M.",
+  "model":  "gpt-4o-mini",
+  "attachments": [
+    {
+      "filename":     "loss_run_2025.pdf",
+      "content_type": "application/pdf",
+      "size_bytes":   142300,
+      "analyzer_id":  "prebuilt-read",
+      "fields": {
+        "PolicyNumber":   {"value": "CP-2041",     "confidence": 0.98},
+        "InsuredName":    {"value": "Acme Corp",   "confidence": 0.97},
+        "TotalLosses":    {"value": "$18,400",     "confidence": 0.95},
+        "PolicyPeriod":   {"value": "2024–2025",   "confidence": 0.96}
+      },
+      "markdown": "# Loss Run Report\n**Policy:** CP-2041 ..."
+    },
+    {
+      "filename":     "photo.heic",
+      "content_type": "image/heic",
+      "size_bytes":   3200000,
+      "skipped_reason": "unsupported_type"
+    }
+  ]
+}
+```
+
+The intent is notably richer when CU fields are available — the LLM receives the extracted policy number, coverage amounts, and dates as context alongside the email body.
+
+---
+
+## Content Understanding (optional)
+
+Attachment extraction is opt-in. Set three environment variables to enable it — the pipeline works identically without them.
+
+| Variable | Description |
+|---|---|
+| `AZURE_CU_ENDPOINT` | Your Azure AI Services endpoint, e.g. `https://<resource>.cognitiveservices.azure.com` |
+| `AZURE_CU_API_KEY` | API key for the resource |
+| `AZURE_CU_ANALYZER_ID` | Analyzer to use (default: `prebuilt-read`). Use a custom analyzer for ACORD forms or loss runs. |
+
+Add these to `k8s/configmap.yaml` (endpoint + analyzer ID) and `k8s/secrets-template.yaml` (API key) then redeploy.
+
+**Supported attachment types:** PDF, JPEG, PNG, TIFF, BMP. Attachments of other types or over 10 MB are included in the event with a `skipped_reason` field and not sent to CU.
+
+**Custom analyzers:** The `prebuilt-read` default extracts raw text and basic layout. For structured field extraction from domain-specific forms (ACORD 125, loss runs, certificates of insurance), create a custom analyzer in Azure AI Foundry and set `AZURE_CU_ANALYZER_ID` to its ID.
 
 ---
 
@@ -346,8 +411,9 @@ All resources are provisioned in a single resource group named `rg-<prefix>`.
 .
 ├── src/
 │   ├── shared/
-│   │   ├── graph_client.py        # Graph API: auth, subscriptions, delta query, ASB URL builder
-│   │   └── cosmos_client.py       # Cosmos DB: mailbox + subscription tracking
+│   │   ├── graph_client.py                 # Graph API: auth, subscriptions, delta query, attachments
+│   │   ├── cosmos_client.py                # Cosmos DB: mailbox + subscription tracking
+│   │   └── content_understanding_client.py # Azure CU: submit bytes, poll result, extract fields
 │   ├── reconciler/
 │   │   ├── reconciler.py          # Hourly subscription reconciliation
 │   │   ├── requirements.txt

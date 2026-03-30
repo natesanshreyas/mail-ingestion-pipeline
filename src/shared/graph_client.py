@@ -244,6 +244,32 @@ class GraphClient:
         logger.info("Delta query for %s → %d messages", mailbox_id, len(messages))
         return messages, new_delta_token
 
+    # ------------------------------------------------------------------
+    # Attachments
+    # ------------------------------------------------------------------
+
+    def list_attachments(self, mailbox_id: str, message_id: str) -> list[dict]:
+        """Return attachment metadata for a message (name, contentType, size, id)."""
+        url = (
+            f"{GRAPH_BASE}/users/{mailbox_id}/messages/{message_id}/attachments"
+            f"?$select=id,name,contentType,size"
+        )
+        try:
+            return self._get(url).get("value", [])
+        except Exception as exc:
+            logger.warning("Could not list attachments for message %s: %s", message_id, exc)
+            return []
+
+    def download_attachment(self, mailbox_id: str, message_id: str, attachment_id: str) -> bytes:
+        """Download raw bytes for a single attachment."""
+        url = (
+            f"{GRAPH_BASE}/users/{mailbox_id}/messages/{message_id}"
+            f"/attachments/{attachment_id}/$value"
+        )
+        r = self._http.get(url, headers=self._headers())
+        r.raise_for_status()
+        return r.content
+
     def close(self) -> None:
         self._http.close()
 
